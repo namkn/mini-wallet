@@ -13,4 +13,13 @@ export function dec(value: string | number | BigNumber): BigNumber {
   return bn;
 }
 
+export function isPositiveDecimal(value: string): boolean {
+  try {
+    const amount = dec(value);
+    return amount.isFinite() && amount.gt(0);
+  } catch {
+    return false;
+  }
+}
+
 export const ZERO = dec(0);
