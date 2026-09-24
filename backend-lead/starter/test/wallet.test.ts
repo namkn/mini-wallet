@@ -325,3 +325,87 @@ describe('POST /psp/callbacks that must not pay', () => {
     expect(dec(await walletBalance(memberId)).eq('20')).toBe(true);
   });
 });
+
+async function accruedTurnover(memberId: string): Promise<string> {
+  const rows = await sequelize.query<{ accrued_turnover: string }>(
+    `SELECT accrued_turnover::text AS accrued_turnover FROM wallets WHERE member_id = :memberId`,
+    { replacements: { memberId }, type: QueryTypes.SELECT },
+  );
+  return rows[0].accrued_turnover;
+}
+
+async function credit(memberId: string, amount: string, turnoverMultiplier: number): Promise<void> {
+  const deposit = await openDeposit(memberId, amount, turnoverMultiplier);
+  const res = await request(app).post('/psp/callbacks').send({
+    pspRef: deposit.pspRef,
+    status: 'completed',
+    amount,
+  });
+  expect(res.status).toBe(200);
+}
+
+describe('POST /wallets/:walletId/wagers', () => {
+  it('debits a wager that fits and accrues the stake', async () => {
+    const { memberId, walletId } = await createMember('nina14');
+    await credit(memberId, '100.00', 1);
+
+    const res = await request(app).post(`/wallets/${walletId}/wagers`).send({ amount: '30.00' });
+
+    expect(res.status).toBe(201);
+    expect(dec(await walletBalance(memberId)).eq('70')).toBe(true);
+    expect(dec(await accruedTurnover(memberId)).eq('30')).toBe(true);
+    expect(dec(await ledgerSum(walletId)).eq('70')).toBe(true);
+  });
+
+  it('refuses a wager the balance cannot cover', async () => {
+    const { memberId, walletId } = await createMember('opal15');
+    await credit(memberId, '100.00', 1);
+
+    const res = await request(app).post(`/wallets/${walletId}/wagers`).send({ amount: '100.01' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe('insufficient_balance');
+    expect(dec(await walletBalance(memberId)).eq('100')).toBe(true);
+    expect(dec(await accruedTurnover(memberId)).eq('0')).toBe(true);
+    expect(dec(await ledgerSum(walletId)).eq('100')).toBe(true);
+  });
+
+  it('commits two in-flight wagers that both fit', async () => {
+    const { memberId, walletId } = await createMember('pia16');
+    await credit(memberId, '100.00', 1);
+
+    const [first, second] = await Promise.all([
+      request(app).post(`/wallets/${walletId}/wagers`).send({ amount: '30.00' }),
+      request(app).post(`/wallets/${walletId}/wagers`).send({ amount: '30.00' }),
+    ]);
+
+    expect([first.status, second.status]).toEqual([201, 201]);
+    expect(dec(await walletBalance(memberId)).eq('40')).toBe(true);
+    expect(dec(await accruedTurnover(memberId)).eq('60')).toBe(true);
+    expect(dec(await ledgerSum(walletId)).eq('40')).toBe(true);
+  });
+
+  it('keeps the wallet non-negative when two in-flight wagers cannot both fit', async () => {
+    const { memberId, walletId } = await createMember('quinn17');
+    await credit(memberId, '100.00', 1);
+
+    const [first, second] = await Promise.all([
+      request(app).post(`/wallets/${walletId}/wagers`).send({ amount: '60.00' }),
+      request(app).post(`/wallets/${walletId}/wagers`).send({ amount: '60.00' }),
+    ]);
+
+    const statuses = [first.status, second.status].sort();
+    expect(statuses).toEqual([201, 422]);
+    expect(dec(await walletBalance(memberId)).eq('40')).toBe(true);
+    expect(dec(await accruedTurnover(memberId)).eq('60')).toBe(true);
+    expect(dec(await ledgerSum(walletId)).gte('0')).toBe(true);
+    expect(dec(await ledgerSum(walletId)).eq(await walletBalance(memberId))).toBe(true);
+  });
+
+  it('rejects a wager on an unknown wallet', async () => {
+    const res = await request(app)
+      .post('/wallets/00000000-0000-4000-8000-000000000002/wagers')
+      .send({ amount: '1.00' });
+    expect(res.status).toBe(404);
+  });
+});
