@@ -6,6 +6,7 @@ import { membersRouter } from './routes/members';
 import { callbacksRouter } from './routes/callbacks';
 import { depositsRouter } from './routes/deposits';
 import { wagersRouter } from './routes/wagers';
+import { withdrawalsRouter } from './routes/withdrawals';
 
 const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   if (err instanceof ZodError) {
@@ -30,6 +31,7 @@ export function createApp() {
   app.use('/deposits', depositsRouter);
   app.use('/psp/callbacks', callbacksRouter);
   app.use('/wallets', wagersRouter);
+  app.use('/withdrawals', withdrawalsRouter);
 
   app.use(errorHandler);
   return app;

@@ -409,3 +409,71 @@ describe('POST /wallets/:walletId/wagers', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('POST /withdrawals', () => {
+  it('reports outstanding turnover and does not debit while play-through is short', async () => {
+    const { memberId, walletId } = await createMember('rhea18');
+    await credit(memberId, '100.00', 1);
+
+    const blocked = await request(app).post('/withdrawals').send({ memberId, amount: '40.00' });
+
+    expect(blocked.status).toBe(422);
+    expect(blocked.body.error).toBe('turnover_outstanding');
+    expect(dec(blocked.body.outstanding).eq('100')).toBe(true);
+    expect(dec(await walletBalance(memberId)).eq('100')).toBe(true);
+    expect(dec(await ledgerSum(walletId)).eq('100')).toBe(true);
+
+    const bothShort = await request(app).post('/withdrawals').send({ memberId, amount: '250.00' });
+    expect(bothShort.status).toBe(422);
+    expect(bothShort.body.error).toBe('turnover_outstanding');
+    expect(dec(bothShort.body.outstanding).eq('100')).toBe(true);
+  });
+
+  it('debits a withdrawal once play-through is met and cash is available', async () => {
+    const { memberId, walletId } = await createMember('sara19');
+    await credit(memberId, '100.00', 1);
+    const wager = await request(app).post(`/wallets/${walletId}/wagers`).send({ amount: '100.00' });
+    expect(wager.status).toBe(201);
+
+    const broke = await request(app).post('/withdrawals').send({ memberId, amount: '40.00' });
+    expect(broke.status).toBe(422);
+    expect(broke.body.error).toBe('insufficient_balance');
+
+    await credit(memberId, '40.00', 0);
+    expect(dec(await requiredTurnover(memberId)).eq('100')).toBe(true);
+
+    const paid = await request(app).post('/withdrawals').send({ memberId, amount: '40.00' });
+    expect(paid.status).toBe(201);
+    expect(paid.body.status).toBe('pending');
+    expect(paid.body.id).toEqual(expect.any(String));
+    expect(dec(await walletBalance(memberId)).eq('0')).toBe(true);
+    expect(dec(await accruedTurnover(memberId)).eq('100')).toBe(true);
+    expect(dec(await requiredTurnover(memberId)).eq('100')).toBe(true);
+    expect(dec(await ledgerSum(walletId)).eq('0')).toBe(true);
+  });
+
+  it('locks the wallet again when a later deposit adds required turnover', async () => {
+    const { memberId, walletId } = await createMember('tina20');
+    await credit(memberId, '100.00', 1);
+    await request(app).post(`/wallets/${walletId}/wagers`).send({ amount: '100.00' });
+    await credit(memberId, '50.00', 0);
+
+    const first = await request(app).post('/withdrawals').send({ memberId, amount: '10.00' });
+    expect(first.status).toBe(201);
+
+    await credit(memberId, '20.00', 1);
+    const locked = await request(app).post('/withdrawals').send({ memberId, amount: '10.00' });
+    expect(locked.status).toBe(422);
+    expect(locked.body.error).toBe('turnover_outstanding');
+    expect(dec(locked.body.outstanding).eq('20')).toBe(true);
+    expect(dec(await walletBalance(memberId)).eq('60')).toBe(true);
+  });
+
+  it('rejects a withdrawal for a member with no wallet', async () => {
+    const res = await request(app).post('/withdrawals').send({
+      memberId: '00000000-0000-4000-8000-000000000003',
+      amount: '1.00',
+    });
+    expect(res.status).toBe(404);
+  });
+});
