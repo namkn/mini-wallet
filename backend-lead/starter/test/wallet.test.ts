@@ -205,3 +205,123 @@ describe('POST /psp/callbacks completed', () => {
     expect(dec(await ledgerSum(walletId)).eq('100')).toBe(true);
   });
 });
+
+describe('POST /psp/callbacks that must not pay', () => {
+  it('leaves a mismatched completed callback pending so a later match can credit', async () => {
+    const { memberId, walletId } = await createMember('iris09');
+    const deposit = await openDeposit(memberId, '100.00', 1);
+
+    const mismatch = await request(app).post('/psp/callbacks').send({
+      pspRef: deposit.pspRef,
+      status: 'completed',
+      amount: '90.00',
+    });
+
+    expect(mismatch.status).toBe(409);
+    expect(mismatch.body.error).toBe('amount_mismatch');
+    expect(dec(mismatch.body.expected).eq('100')).toBe(true);
+    expect(dec(mismatch.body.received).eq('90')).toBe(true);
+    expect(dec(await walletBalance(memberId)).eq('0')).toBe(true);
+    expect(await depositRowCount(walletId)).toBe(0);
+
+    const match = await request(app).post('/psp/callbacks').send({
+      pspRef: deposit.pspRef,
+      status: 'completed',
+      amount: '100.00',
+    });
+    expect(match.status).toBe(200);
+    expect(dec(await walletBalance(memberId)).eq('100')).toBe(true);
+    expect(await depositRowCount(walletId)).toBe(1);
+  });
+
+  it('rejects an unknown pspRef and inserts nothing', async () => {
+    const { walletId } = await createMember('jade10');
+
+    const res = await request(app).post('/psp/callbacks').send({
+      pspRef: '00000000-0000-4000-8000-000000000099',
+      status: 'completed',
+      amount: '10.00',
+    });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('unknown_psp_ref');
+    expect(await depositRowCount(walletId)).toBe(0);
+    const funding = await sequelize.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM funding_transactions WHERE psp_ref = :pspRef`,
+      {
+        replacements: { pspRef: '00000000-0000-4000-8000-000000000099' },
+        type: QueryTypes.SELECT,
+      },
+    );
+    expect(funding[0].count).toBe('0');
+  });
+
+  it('fails a pending deposit for any finite amount without crediting', async () => {
+    const { memberId, walletId } = await createMember('kate11');
+    const deposit = await openDeposit(memberId, '50.00', 1);
+
+    const res = await request(app).post('/psp/callbacks').send({
+      pspRef: deposit.pspRef,
+      status: 'failed',
+      amount: '-1',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ id: deposit.id, status: 'failed' });
+    expect(dec(await walletBalance(memberId)).eq('0')).toBe(true);
+    expect(dec(await requiredTurnover(memberId)).eq('0')).toBe(true);
+    expect(await depositRowCount(walletId)).toBe(0);
+  });
+
+  it('rejects a non-numeric callback amount without changing the deposit', async () => {
+    const { memberId } = await createMember('lena12');
+    const deposit = await openDeposit(memberId, '50.00', 1);
+
+    const res = await request(app).post('/psp/callbacks').send({
+      pspRef: deposit.pspRef,
+      status: 'completed',
+      amount: 'nope',
+    });
+
+    expect(res.status).toBe(400);
+    const again = await request(app).post('/psp/callbacks').send({
+      pspRef: deposit.pspRef,
+      status: 'completed',
+      amount: '50.00',
+    });
+    expect(again.status).toBe(200);
+    expect(dec(await walletBalance(memberId)).eq('50')).toBe(true);
+  });
+
+  it('rejects the opposite outcome after the deposit is already terminal', async () => {
+    const { memberId } = await createMember('mira13');
+    const completed = await openDeposit(memberId, '20.00', 1);
+    await request(app).post('/psp/callbacks').send({
+      pspRef: completed.pspRef,
+      status: 'completed',
+      amount: '20.00',
+    });
+    const lateFail = await request(app).post('/psp/callbacks').send({
+      pspRef: completed.pspRef,
+      status: 'failed',
+      amount: '20.00',
+    });
+    expect(lateFail.status).toBe(409);
+    expect(lateFail.body.error).toBe('invalid_transition');
+    expect(dec(await walletBalance(memberId)).eq('20')).toBe(true);
+
+    const failed = await openDeposit(memberId, '15.00', 1);
+    await request(app).post('/psp/callbacks').send({
+      pspRef: failed.pspRef,
+      status: 'failed',
+      amount: '0',
+    });
+    const lateComplete = await request(app).post('/psp/callbacks').send({
+      pspRef: failed.pspRef,
+      status: 'completed',
+      amount: '15.00',
+    });
+    expect(lateComplete.status).toBe(409);
+    expect(dec(await walletBalance(memberId)).eq('20')).toBe(true);
+  });
+});
