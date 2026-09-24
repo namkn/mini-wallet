@@ -3,6 +3,7 @@ import { ZodError } from 'zod';
 import { HttpError } from './lib/httpError';
 import { healthRouter } from './routes/health';
 import { membersRouter } from './routes/members';
+import { callbacksRouter } from './routes/callbacks';
 import { depositsRouter } from './routes/deposits';
 
 const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
@@ -26,6 +27,7 @@ export function createApp() {
   app.use('/health', healthRouter);
   app.use('/members', membersRouter);
   app.use('/deposits', depositsRouter);
+  app.use('/psp/callbacks', callbacksRouter);
 
   app.use(errorHandler);
   return app;

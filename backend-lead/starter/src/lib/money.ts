@@ -13,6 +13,14 @@ export function dec(value: string | number | BigNumber): BigNumber {
   return bn;
 }
 
+export function isFiniteDecimal(value: string): boolean {
+  try {
+    return dec(value).isFinite();
+  } catch {
+    return false;
+  }
+}
+
 export function isPositiveDecimal(value: string): boolean {
   try {
     const amount = dec(value);

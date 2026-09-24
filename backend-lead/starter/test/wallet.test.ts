@@ -1,4 +1,5 @@
 import request from 'supertest';
+import { QueryTypes } from 'sequelize';
 import { createApp } from '../src/app';
 import { sequelize } from '../src/db/sequelize';
 import { dec } from '../src/lib/money';
@@ -110,5 +111,97 @@ describe('POST /deposits', () => {
     expect(first.status).toBe(201);
     expect(second.status).toBe(201);
     expect(first.body.pspRef).not.toBe(second.body.pspRef);
+  });
+});
+
+async function openDeposit(
+  memberId: string,
+  amount: string,
+  turnoverMultiplier?: number,
+): Promise<{ id: string; pspRef: string }> {
+  const body: { memberId: string; amount: string; turnoverMultiplier?: number } = { memberId, amount };
+  if (turnoverMultiplier !== undefined) body.turnoverMultiplier = turnoverMultiplier;
+  const res = await request(app).post('/deposits').send(body);
+  expect(res.status).toBe(201);
+  return { id: res.body.id, pspRef: res.body.pspRef };
+}
+
+async function requiredTurnover(memberId: string): Promise<string> {
+  const rows = await sequelize.query<{ required_turnover: string }>(
+    `SELECT required_turnover::text AS required_turnover
+     FROM wallets WHERE member_id = :memberId`,
+    { replacements: { memberId }, type: QueryTypes.SELECT },
+  );
+  return rows[0].required_turnover;
+}
+
+describe('POST /psp/callbacks completed', () => {
+  it('credits a matching completed callback once and keeps the ledger equal to the balance', async () => {
+    const { memberId, walletId } = await createMember('erin05');
+    const deposit = await openDeposit(memberId, '100.50', 1);
+
+    const res = await request(app).post('/psp/callbacks').send({
+      pspRef: deposit.pspRef,
+      status: 'completed',
+      amount: '100.5',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ id: deposit.id, status: 'completed' });
+    expect(dec(await walletBalance(memberId)).eq('100.50')).toBe(true);
+    expect(dec(await requiredTurnover(memberId)).eq('100.50')).toBe(true);
+    expect(await depositRowCount(walletId)).toBe(1);
+    expect(dec(await ledgerSum(walletId)).eq(await walletBalance(memberId))).toBe(true);
+  });
+
+  it('credits a multiplier of 0 without raising required turnover', async () => {
+    const { memberId } = await createMember('fran06');
+    const deposit = await openDeposit(memberId, '40.00', 0);
+
+    const res = await request(app).post('/psp/callbacks').send({
+      pspRef: deposit.pspRef,
+      status: 'completed',
+      amount: '40.00',
+    });
+
+    expect(res.status).toBe(200);
+    expect(dec(await walletBalance(memberId)).eq('40')).toBe(true);
+    expect(dec(await requiredTurnover(memberId)).eq('0')).toBe(true);
+  });
+
+  it('does not credit a sequential or differing replay of a completed callback', async () => {
+    const { memberId, walletId } = await createMember('gina07');
+    const deposit = await openDeposit(memberId, '80.00', 1);
+    const body = { pspRef: deposit.pspRef, status: 'completed', amount: '80.00' };
+
+    const first = await request(app).post('/psp/callbacks').send(body);
+    const second = await request(app).post('/psp/callbacks').send(body);
+    const different = await request(app)
+      .post('/psp/callbacks')
+      .send({ pspRef: deposit.pspRef, status: 'completed', amount: '1.00' });
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(second.body).toEqual({ id: deposit.id, status: 'completed' });
+    expect(different.status).toBe(200);
+    expect(dec(await walletBalance(memberId)).eq('80')).toBe(true);
+    expect(await depositRowCount(walletId)).toBe(1);
+    expect(dec(await ledgerSum(walletId)).eq('80')).toBe(true);
+  });
+
+  it('credits once when two completed callbacks are in flight', async () => {
+    const { memberId, walletId } = await createMember('hana08');
+    const deposit = await openDeposit(memberId, '100.00', 1);
+    const body = { pspRef: deposit.pspRef, status: 'completed', amount: '100.00' };
+
+    const [first, second] = await Promise.all([
+      request(app).post('/psp/callbacks').send(body),
+      request(app).post('/psp/callbacks').send(body),
+    ]);
+
+    expect([first.status, second.status]).toEqual([200, 200]);
+    expect(dec(await walletBalance(memberId)).eq('100')).toBe(true);
+    expect(await depositRowCount(walletId)).toBe(1);
+    expect(dec(await ledgerSum(walletId)).eq('100')).toBe(true);
   });
 });
